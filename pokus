@@ -2,22 +2,19 @@
 #include <WiFiClient.h>
 
 // ⚙️ WiFi připojení
-const char* ssid = "TVOJE_WIFI_SIT";
-const char* password = "TVOJE_HESLO";
+const char* ssid = "miminko";
+const char* password = "KoPaCkOpEdIrU";
 
 // ⚙️ Z21PG konfigurace
-const char* z21_host = "192.168.0.111";
+IPAddress z21_ip(192, 168, 2, 128);
 const uint16_t z21_port = 21105;
 
-// UART2 (Serial2) piny
-#define RXD2 16
-#define TXD2 17
-
-WiFiClient z21Client;
+// --- Inicializace ---
+WiFiUDP udp;
 
 void setup() {
-  Serial.begin(115200);    // Debug
-  Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);  // UART pro Arduino Pro Mini
+  Serial.begin(115200);
+  delay(1000);
 
   Serial.println("Connecting to WiFi...");
   WiFi.begin(ssid, password);
@@ -26,89 +23,80 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\nWiFi connected");
+  Serial.print("ESP32 IP address: ");
+  Serial.println(WiFi.localIP());
+
+  udp.begin(21105);
+
+  delay(1000);
+
+  sendPowerOn();
+  delay(500);
+
+  // Zapni F0
+  sendLocoFunction(3, 0, 1);
+  Serial.println("F0 ON sent");
+  delay(5000);  // počkej 5 sekund
+
+  // Vypni F0
+  sendLocoFunction(3, 0, 0);
+  Serial.println("F0 OFF sent");
 }
 
 void loop() {
-  // Pokud není připojeno k Z21, zkusit reconnect
-  if (!z21Client.connected()) {
-    Serial.println("Connecting to Z21...");
-    if (z21Client.connect(z21_host, z21_port)) {
-      Serial.println("Connected to Z21PG");
-    } else {
-      Serial.println("Failed to connect, retrying in 3 sec...");
-      delay(3000);
-      return;
+  // Příjem odpovědí (volitelné pro ladění)
+  int packetSize = udp.parsePacket();
+  if (packetSize) {
+    uint8_t buffer[64];
+    int len = udp.read(buffer, sizeof(buffer));
+    Serial.print("Received UDP packet: ");
+    for (int i = 0; i < len; i++) {
+      Serial.printf("%02X ", buffer[i]);
     }
-  }
-
-  // Čtení dat z UART2
-  if (Serial2.available()) {
-    String line = Serial2.readStringUntil('\n');  // Čte celý řádek
-    Serial.print("Received: ");
-    Serial.println(line);
-
-    // Parsování vstupu
-    int loco = 0, speed = 0, dir = 0, f0 = 0;
-    if (parseCommand(line, loco, speed, dir, f0)) {
-      sendLocoDrive(z21Client, getDccAddress(loco), speed, dir, f0);
-    }
+    Serial.println();
   }
 }
 
-// Převod čísla lokomotivy 1..6 na DCC adresu
-uint16_t getDccAddress(int loco) {
-  switch (loco) {
-    case 1: return 3;
-    case 2: return 7;
-    case 3: return 11;
-    case 4: return 15;
-    case 5: return 19;
-    case 6: return 23;
-    default: return 3;
+// --- Poslání Power ON ---
+void sendPowerOn() {
+  uint8_t powerOn[] = {0x04, 0x21, 0x01, 0x01};
+  sendUdpPacket(powerOn, sizeof(powerOn));
+  Serial.println("Power ON sent");
+}
+
+// --- Ovládání funkce F ---
+void sendLocoFunction(uint16_t address, uint8_t functionIndex, uint8_t action) {
+  uint8_t adr_msb = (address >> 8) & 0x3F;
+  if (address >= 128) {
+    adr_msb |= 0xC0;
   }
+  uint8_t adr_lsb = address & 0xFF;
+
+  uint8_t db0 = ((action & 0x03) << 6) | (functionIndex & 0x3F);
+
+  uint8_t packet[9];
+  packet[0] = 0x0A; // délka
+  packet[1] = 0x00;
+  packet[2] = 0x40;
+  packet[3] = 0x00;
+  packet[4] = 0xE4; // LAN_X_SET_LOCO_FUNCTION
+  packet[5] = db0;
+  packet[6] = adr_msb;
+  packet[7] = adr_lsb;
+
+  uint8_t xorByte = 0;
+  for (int i = 1; i <= 7; i++) {
+    xorByte ^= packet[i];
+  }
+  packet[8] = xorByte;
+
+  sendUdpPacket(packet, sizeof(packet));
 }
 
-// Parsování zprávy typu "1:45:1:1"
-bool parseCommand(String input, int &loco, int &speed, int &dir, int &f0) {
-  int first = input.indexOf(':');
-  int second = input.indexOf(':', first + 1);
-  int third = input.indexOf(':', second + 1);
-
-  if (first < 0 || second < 0 || third < 0) return false;
-
-  loco  = input.substring(0, first).toInt();
-  speed = input.substring(first + 1, second).toInt();
-  dir   = input.substring(second + 1, third).toInt();
-  f0    = input.substring(third + 1).toInt();
-
-  return true;
-}
-
-// Vytvoření a odeslání LAN příkazu Z21 "Set Loco Drive" (0xE4)
-void sendLocoDrive(WiFiClient &client, uint16_t address, uint8_t speed, uint8_t direction, uint8_t f0) {
-  uint8_t flags = 0b00000000;
-  if (direction) flags |= 0b00100000;  // Direction forward
-  flags |= 0b00010000;                 // 128 speed steps
-  if (f0) flags |= 0b00000001;         // Function F0 on
-
-  uint8_t cmd[10];
-  cmd[0] = 0x08;               // Délka paketu v bytech (včetně Length a X-Or)
-  cmd[1] = 0xE4;               // Command: Set Loco Drive
-  cmd[2] = (address >> 8) & 0xFF;  // Address high byte
-  cmd[3] = address & 0xFF;         // Address low byte
-  cmd[4] = flags;
-  cmd[5] = speed & 0x7F;
-  cmd[6] = 0x00;               // Future use (ignore)
-  cmd[7] = 0x00;               // Future use (ignore)
-
-  // Spočítání XOR
-  uint8_t xorSum = 0;
-  for (int i = 0; i < 8; i++) xorSum ^= cmd[i];
-  cmd[8] = xorSum;
-
-  // Odeslat paket
-  client.write(cmd, 9);
-
-  Serial.print("Sent Drive Packet to ");
-  Serial.println(address);
+// --- Poslání UDP paketu ---
+void sendUdpPacket(const uint8_t* data, size_t len) {
+  udp.beginPacket(z21_ip, z21_port);
+  udp.write(data, len);
+  udp.endPacket();
+  Serial.println("UDP packet sent");
 }
