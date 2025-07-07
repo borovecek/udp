@@ -2,11 +2,11 @@
 #include <WiFiClient.h>
 
 // ⚙️ WiFi připojení
-const char* ssid = "miminko";
-const char* password = "KoPaCkOpEdIrU";
+const char* ssid = "Z21_ESP";
+const char* password = "12345678";
 
 // ⚙️ Z21PG konfigurace
-IPAddress z21_ip(192, 168, 2, 128);
+IPAddress z21_ip(192, 168, 0, 111);
 const uint16_t z21_port = 21105;
 
 // --- UDP komunikace ---
@@ -40,6 +40,7 @@ void loop() {
     int loco = 0, speed = 0, dir = 0, f0 = 0;
     if (parseCommand(line, loco, speed, dir, f0)) {
       sendLocoDrive(getDccAddress(loco), speed,dir, 3);
+      sendLocoFunction(getDccAddress(loco), 0, f0); // F0 ON
     }
   }
 }
@@ -106,6 +107,42 @@ void sendLocoDrive(uint16_t address, uint8_t speed, int forward, uint8_t speedSt
   sendUdpPacket(packet, sizeof(packet));
   Serial.print("Sent Drive Packet to address ");
   Serial.println(address);
+}
+void sendLocoFunction(uint16_t address, uint8_t functionIndex, uint8_t action) {
+  uint8_t adr_msb = (address >> 8) & 0x3F;
+  if (address >= 128) {
+    adr_msb |= 0xC0;
+  }
+  uint8_t adr_lsb = address & 0xFF;
+
+  // DB0: TTNNNNNN
+  uint8_t db0 = ((action & 0x03) << 6) | (functionIndex & 0x3F);
+
+  uint8_t packet[10];
+  packet[0] = 0x0A; // délka dat
+  packet[1] = 0x00;
+  packet[2] = 0x40;
+  packet[3] = 0x00;
+  packet[4] = 0xE4; // LAN_X_SET_LOCO_FUNCTION
+  packet[5] = 0xF8;
+  packet[6] = adr_msb;
+  packet[7] = adr_lsb;
+  packet[8] = db0; // nevyužito pro F0-F12
+
+  uint8_t xorByte = 0;
+  for (int i = 1; i <= 8; i++) {
+    xorByte ^= packet[i];
+  }
+  packet[9] = xorByte;
+
+  sendUdpPacket(packet, sizeof(packet));
+
+  Serial.print("Function command sent: Addr=");
+  Serial.print(address);
+  Serial.print(", Func=");
+  Serial.print(functionIndex);
+  Serial.print(", Action=");
+  Serial.println(action);
 }
 void sendUdpPacket(std::initializer_list<uint8_t> data) {
   udp.beginPacket(z21_ip, z21_port);
